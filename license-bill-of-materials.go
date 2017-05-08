@@ -301,7 +301,7 @@ func getPackagesInfo(gopath string, pkgs []string) ([]*PkgInfo, error) {
 	decoder := json.NewDecoder(bytes.NewBuffer(out))
 	for _, pkg := range pkgs {
 		info := &PkgInfo{}
-		err := decoder.Decode(info)
+		err = decoder.Decode(info)
 		if err != nil {
 			return nil, fmt.Errorf("could not retrieve package information for %s", pkg)
 		}
@@ -319,68 +319,62 @@ func getPackagesInfo(gopath string, pkgs []string) ([]*PkgInfo, error) {
 
 var (
 	reLicense = regexp.MustCompile(`(?i)^(?:` +
-		`((?:un)?licen[sc]e)|` +
-		`((?:un)?licen[sc]e\.(?:md|markdown|txt))|` +
+		`((?:un)?licen[sc]e(?:\.[^.]+)?)|` +
 		`(copy(?:ing|right)(?:\.[^.]+)?)|` +
-		`(licen[sc]e\.[^.]+)` +
 		`)$`)
 )
 
 // scoreLicenseName returns a factor between 0 and 1 weighting how likely
 // supplied filename is a license file.
-func scoreLicenseName(name string) float64 {
+func scoreLicenseName(name string) int8 {
 	m := reLicense.FindStringSubmatch(name)
 	switch {
 	case m == nil:
 		break
-	case m[1] != "":
-		return 1.0
-	case m[2] != "":
-		return 0.9
-	case m[3] != "":
-		return 0.8
-	case m[4] != "":
-		return 0.7
+	case m[1] != "" || m[2] != "":
+		return 1
 	}
-	return 0.
+	return 0
 }
 
-// findLicense looks for license files in package import path, and down to
+// findLicenses looks for license files in package import path, and down to
 // parent directories until a file is found or $GOPATH/src is reached. It
 // returns the path and score of the best entry, an empty string if none was
 // found.
-func findLicense(info *PkgInfo) (string, error) {
+func findLicenses(info *PkgInfo) ([]string, error) {
 	path := info.ImportPath
 	for ; path != "."; path = filepath.Dir(path) {
 		fis, err := ioutil.ReadDir(filepath.Join(info.Root, "src", path))
 		if err != nil {
-			return "", err
+			return []string{""}, err
 		}
-		bestScore := float64(0)
-		bestName := ""
+		allViableNames := make([]string, 0)
 		for _, fi := range fis {
 			if !fi.Mode().IsRegular() {
 				continue
 			}
 			score := scoreLicenseName(fi.Name())
-			if score > bestScore {
-				bestScore = score
-				bestName = fi.Name()
+			if score == 1 {
+				allViableNames = append(allViableNames, filepath.Join(path, fi.Name()))
 			}
 		}
-		if bestName != "" {
-			return filepath.Join(path, bestName), nil
+		if len(allViableNames) > 0 {
+			return allViableNames, nil
 		}
 	}
-	return "", nil
+	return []string{""}, nil
 }
 
 type License struct {
 	Package      string
+	LicenseInfos []*LicenseInfo
+	Err          string
+}
+
+type LicenseInfo struct {
+	Path         string
 	Score        float64
 	Template     *Template
-	Path         string
-	Err          string
 	ExtraWords   []string
 	MissingWords []string
 }
@@ -419,39 +413,52 @@ func listLicenses(gopath string, pkgs []string) ([]License, error) {
 	for _, info := range infos {
 		if info.Error != nil {
 			licenses = append(licenses, License{
-				Package: info.Name,
-				Err:     info.Error.Err,
+				Package:      info.Name,
+				Err:          info.Error.Err,
+				LicenseInfos: []*LicenseInfo{{Path: ""}},
 			})
 			continue
 		}
 		if stdSet[info.ImportPath] {
 			continue
 		}
-		path, err := findLicense(info)
+		paths, err := findLicenses(info)
 		if err != nil {
 			return nil, err
 		}
-		license := License{
-			Package: info.ImportPath,
-			Path:    path,
+		licenseInfos := []*LicenseInfo{}
+		license := License{Package: info.ImportPath}
+		if len(paths) == 0 {
+			license.LicenseInfos = []*LicenseInfo{{Path: ""}}
 		}
-		if path != "" {
-			fpath := filepath.Join(info.Root, "src", path)
-			m, ok := matched[fpath]
-			if !ok {
-				data, err := ioutil.ReadFile(fpath)
-				if err != nil {
-					return nil, err
+		for _, path := range paths {
+			li := LicenseInfo{Path: path}
+			if path != "" {
+				fpath := filepath.Join(info.Root, "src", path)
+				m, ok := matched[fpath]
+				if !ok {
+					data, err := ioutil.ReadFile(fpath)
+					if err != nil {
+						return nil, err
+					}
+					m = matchTemplates(data, templates)
+					matched[fpath] = m
 				}
-				m = matchTemplates(data, templates)
-				matched[fpath] = m
+				li.Score = m.Score
+				li.Template = m.Template
+				li.ExtraWords = m.ExtraWords
+				li.MissingWords = m.MissingWords
 			}
-			license.Score = m.Score
-			license.Template = m.Template
-			license.ExtraWords = m.ExtraWords
-			license.MissingWords = m.MissingWords
+			licenseInfos = append(licenseInfos, &li)
 		}
+		license.LicenseInfos = licenseInfos
 		licenses = append(licenses, license)
+	}
+	for _, l := range licenses {
+		fmt.Println(l.Package)
+		for _, li := range l.LicenseInfos {
+			fmt.Println(li.Path)
+		}
 	}
 	return licenses, nil
 }
@@ -510,10 +517,12 @@ func longestCommonPrefix(licenses []License) string {
 func groupLicenses(licenses []License) ([]License, error) {
 	paths := map[string][]License{}
 	for _, l := range licenses {
-		if l.Path == "" {
-			continue
+		for _, li := range l.LicenseInfos {
+			if li.Path == "" {
+				continue
+			}
+			paths[li.Path] = append(paths[li.Path], l)
 		}
-		paths[l.Path] = append(paths[l.Path], l)
 	}
 	for k, v := range paths {
 		if len(v) <= 1 {
@@ -529,48 +538,77 @@ func groupLicenses(licenses []License) ([]License, error) {
 		paths[k] = []License{l}
 	}
 	kept := []License{}
+	// Ensures only one package with multiple licenses is appended to the list of
+	// kept packages
+	seen := make(map[string]bool)
 	for _, l := range licenses {
-		if l.Path == "" {
+		if len(l.LicenseInfos) == 0 {
 			kept = append(kept, l)
 			continue
 		}
-		if v, ok := paths[l.Path]; ok {
-			kept = append(kept, v[0])
-			delete(paths, l.Path)
+		for _, li := range l.LicenseInfos {
+			if li.Path == "" {
+				kept = append(kept, l)
+				continue
+			}
+			if v, ok := paths[li.Path]; ok {
+				if _, ok := seen[v[0].Package]; !ok {
+					kept = append(kept, v[0])
+					delete(paths, li.Path)
+					seen[v[0].Package] = true
+				}
+			}
 		}
 	}
 	return kept, nil
 }
 
-type projectAndLicense struct {
-	Project    string  `json:"project"`
-	License    string  `json:"license,omitempty"`
-	Confidence float64 `json:"confidence,omitempty"`
-	Error      string  `json:"error,omitempty"`
+type projectAndLicenses struct {
+	Project  string         `json:"project"`
+	Licenses []truncLicense `json:"licenses,omitempty"`
+	Error    string         `json:"error,omitempty"`
 }
 
-func licensesToProjectAndLicenses(licenses []License) (c []projectAndLicense, e []projectAndLicense) {
+type truncLicense struct {
+	Name       string  `json:"name,omitempty"`
+	Confidence float64 `json:"confidence,omitempty"`
+}
+
+func licensesToProjectAndLicenses(licenses []License) (c []projectAndLicenses, e []projectAndLicenses) {
 	for _, l := range licenses {
 		if l.Err != "" {
-			e = append(e, projectAndLicense{
+			e = append(e, projectAndLicenses{
 				Project: removeVendor(l.Package),
 				Error:   l.Err,
 			})
 			continue
 		}
-		if l.Template == nil {
-			e = append(e, projectAndLicense{
+		nt := 0
+		for _, li := range l.LicenseInfos {
+			if li.Template == nil {
+				nt++
+			}
+		}
+		if len(l.LicenseInfos) == nt {
+			e = append(e, projectAndLicenses{
 				Project: removeVendor(l.Package),
 				Error:   "No license detected",
 			})
 			continue
 		}
-		pl := projectAndLicense{
-			Project:    removeVendor(l.Package),
-			License:    l.Template.Title,
-			Confidence: truncateFloat(l.Score),
+		tLicenses := []truncLicense{}
+		for _, li := range l.LicenseInfos {
+			if li.Template.Title != "" {
+				tLicenses = append(tLicenses, truncLicense{
+					Name:       li.Template.Title,
+					Confidence: li.Score,
+				})
+			}
 		}
-		c = append(c, pl)
+		c = append(c, projectAndLicenses{
+			Project:  removeVendor(l.Package),
+			Licenses: tLicenses,
+		})
 	}
 	return c, e
 }
@@ -595,13 +633,15 @@ func truncateFloat(f float64) float64 {
 	return f
 }
 
-func pkgsToLicenses(pkgs []string, overrides string) (pls []projectAndLicense, ne []projectAndLicense) {
-	fplm := make(map[string]string)
+func pkgsToLicenses(pkgs []string, overrides string) (pls []projectAndLicenses, ne []projectAndLicenses) {
+	fplm := make(map[string][]string)
 	if err := json.Unmarshal([]byte(overrides), &pls); err != nil {
 		log.Fatal(err)
 	}
 	for _, pl := range pls {
-		fplm[pl.Project] = pl.License
+		for _, tl := range pl.Licenses {
+			fplm[pl.Project] = append(fplm[pl.Project], tl.Name)
+		}
 	}
 
 	licenses, err := listLicenses("", pkgs)
@@ -615,23 +655,35 @@ func pkgsToLicenses(pkgs []string, overrides string) (pls []projectAndLicense, n
 
 	// detected licenses
 	pls = nil
+	tls := []truncLicense{}
 	for _, pl := range c {
 		if l, ok := fplm[pl.Project]; ok {
-			pl = projectAndLicense{
-				Project:    pl.Project,
-				License:    l,
-				Confidence: 1.0,
+			for _, tl := range l {
+				tls = append(tls, truncLicense{
+					Name:       tl,
+					Confidence: 1.0,
+				})
+			}
+			pl = projectAndLicenses{
+				Project:  pl.Project,
+				Licenses: tls,
 			}
 			delete(fplm, pl.Project)
 		}
 		pls = append(pls, pl)
 	}
 	// force add undetected licenses given by overrides
+	tls = nil
 	for proj, l := range fplm {
-		pls = append(pls, projectAndLicense{
-			Project:    proj,
-			License:    l,
-			Confidence: 1.0,
+		for _, li := range l {
+			tls = append(tls, truncLicense{
+				Name:       li,
+				Confidence: 1.0,
+			})
+		}
+		pls = append(pls, projectAndLicenses{
+			Project:  proj,
+			Licenses: tls,
 		})
 	}
 	// missing / error license

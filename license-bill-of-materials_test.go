@@ -10,12 +10,16 @@ import (
 )
 
 type testResult struct {
-	Package string
+	Package  string
+	Licenses []*testResultLicense
+	Err      string
+}
+
+type testResultLicense struct {
 	License string
 	Score   int
 	Extra   int
 	Missing int
-	Err     string
 }
 
 func listTestLicenses(pkgs []string) ([]testResult, error) {
@@ -32,15 +36,21 @@ func listTestLicenses(pkgs []string) ([]testResult, error) {
 		r := testResult{
 			Package: l.Package,
 		}
-		if l.Template != nil {
-			r.License = l.Template.Title
-			r.Score = int(100 * l.Score)
+		trls := []*testResultLicense{}
+		for _, li := range l.LicenseInfos {
+			trl := testResultLicense{}
+			if li.Template != nil {
+				trl.License = li.Template.Title
+				trl.Score = int(100 * li.Score)
+			}
+			trl.Extra = len(li.ExtraWords)
+			trl.Missing = len(li.MissingWords)
+			trls = append(trls, &trl)
 		}
+		r.Licenses = trls
 		if l.Err != "" {
 			r.Err = "some error"
 		}
-		r.Extra = len(l.ExtraWords)
-		r.Missing = len(l.MissingWords)
 		res = append(res, r)
 	}
 	return res, nil
@@ -50,15 +60,21 @@ func compareTestLicenses(pkgs []string, wanted []testResult) error {
 	stringify := func(res []testResult) string {
 		parts := []string{}
 		for _, r := range res {
-			s := fmt.Sprintf("%s \"%s\" %d%%", r.Package, r.License, r.Score)
-			if r.Err != "" {
-				s += " " + r.Err
-			}
-			if r.Extra > 0 {
-				s += fmt.Sprintf(" +%d", r.Extra)
-			}
-			if r.Missing > 0 {
-				s += fmt.Sprintf(" -%d", r.Missing)
+			s := fmt.Sprintf("%s:", r.Package)
+			for i, trl := range r.Licenses {
+				if i > 0 {
+					s += ";"
+				}
+				s += fmt.Sprintf(" \"%s\" %d%%", trl.License, trl.Score)
+				if r.Err != "" {
+					s += " " + r.Err
+				}
+				if trl.Extra > 0 {
+					s += fmt.Sprintf(" +%d", trl.Extra)
+				}
+				if trl.Missing > 0 {
+					s += fmt.Sprintf(" -%d", trl.Missing)
+				}
 			}
 			parts = append(parts, s)
 		}
@@ -79,16 +95,23 @@ func compareTestLicenses(pkgs []string, wanted []testResult) error {
 
 func TestNoDependencies(t *testing.T) {
 	err := compareTestLicenses([]string{"colors/red"}, []testResult{
-		{Package: "colors/red", License: "MIT License", Score: 98, Missing: 2},
+		{Package: "colors/red", Licenses: []*testResultLicense{
+			{License: "MIT License", Score: 98, Missing: 2},
+		},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 }
 
+// Multiple licenses should be detected
 func TestMultipleLicenses(t *testing.T) {
 	err := compareTestLicenses([]string{"colors/blue"}, []testResult{
-		{Package: "colors/blue", License: "Apache License 2.0", Score: 100},
+		{Package: "colors/blue", Licenses: []*testResultLicense{
+			{License: "MIT License", Score: 98, Missing: 2},
+			{License: "Apache License 2.0", Score: 100}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +120,9 @@ func TestMultipleLicenses(t *testing.T) {
 
 func TestNoLicense(t *testing.T) {
 	err := compareTestLicenses([]string{"colors/green"}, []testResult{
-		{Package: "colors/green", License: "", Score: 0},
+		{Package: "colors/green", Licenses: []*testResultLicense{
+			{License: "", Score: 0}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -107,8 +132,12 @@ func TestNoLicense(t *testing.T) {
 func TestMainWithDependencies(t *testing.T) {
 	// It also tests license retrieval in parent directory.
 	err := compareTestLicenses([]string{"colors/cmd/paint"}, []testResult{
-		{Package: "colors/cmd/paint", License: "Academic Free License v3.0", Score: 100},
-		{Package: "colors/red", License: "MIT License", Score: 98, Missing: 2},
+		{Package: "colors/cmd/paint", Licenses: []*testResultLicense{
+			{License: "Academic Free License v3.0", Score: 100}},
+		},
+		{Package: "colors/red", Licenses: []*testResultLicense{
+			{License: "MIT License", Score: 98, Missing: 2}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -117,10 +146,15 @@ func TestMainWithDependencies(t *testing.T) {
 
 func TestMainWithAliasedDependencies(t *testing.T) {
 	err := compareTestLicenses([]string{"colors/cmd/mix"}, []testResult{
-		{Package: "colors/cmd/mix", License: "Academic Free License v3.0", Score: 100},
-		{Package: "colors/red", License: "MIT License", Score: 98, Missing: 2},
-		{Package: "couleurs/red", License: "GNU Lesser General Public License v2.1",
-			Score: 100},
+		{Package: "colors/cmd/mix", Licenses: []*testResultLicense{
+			{License: "Academic Free License v3.0", Score: 100}},
+		},
+		{Package: "colors/red", Licenses: []*testResultLicense{
+			{License: "MIT License", Score: 98, Missing: 2}},
+		},
+		{Package: "couleurs/red", Licenses: []*testResultLicense{
+			{License: "GNU Lesser General Public License v2.1", Score: 100}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -139,8 +173,10 @@ func TestMissingPackage(t *testing.T) {
 
 func TestMismatch(t *testing.T) {
 	err := compareTestLicenses([]string{"colors/yellow"}, []testResult{
-		{Package: "colors/yellow", License: "Microsoft Reciprocal License", Score: 25,
-			Extra: 106, Missing: 131},
+		{Package: "colors/yellow", Licenses: []*testResultLicense{
+			{License: "Microsoft Reciprocal License", Score: 25, Extra: 106,
+				Missing: 131}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -159,9 +195,15 @@ func TestNoBuildableGoSourceFiles(t *testing.T) {
 
 func TestBroken(t *testing.T) {
 	err := compareTestLicenses([]string{"colors/broken"}, []testResult{
-		{Package: "colors/broken", License: "GNU General Public License v3.0", Score: 100},
-		{Package: "colors/missing", License: "", Score: 0, Err: "some error"},
-		{Package: "colors/red", License: "MIT License", Score: 98, Missing: 2},
+		{Package: "colors/broken", Licenses: []*testResultLicense{
+			{License: "GNU General Public License v3.0", Score: 100}},
+		},
+		{Package: "colors/missing", Err: "some error", Licenses: []*testResultLicense{
+			{License: "", Score: 0}},
+		},
+		{Package: "colors/red", Licenses: []*testResultLicense{
+			{License: "MIT License", Score: 98, Missing: 2}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -169,11 +211,20 @@ func TestBroken(t *testing.T) {
 }
 
 func TestBrokenDependency(t *testing.T) {
+
 	err := compareTestLicenses([]string{"colors/purple"}, []testResult{
-		{Package: "colors/broken", License: "GNU General Public License v3.0", Score: 100},
-		{Package: "colors/missing", License: "", Score: 0, Err: "some error"},
-		{Package: "colors/purple", License: "", Score: 0},
-		{Package: "colors/red", License: "MIT License", Score: 98, Missing: 2},
+		{Package: "colors/broken", Licenses: []*testResultLicense{
+			{License: "GNU General Public License v3.0", Score: 100}},
+		},
+		{Package: "colors/missing", Err: "some error", Licenses: []*testResultLicense{
+			{License: "", Score: 0}},
+		},
+		{Package: "colors/purple", Licenses: []*testResultLicense{
+			{License: "", Score: 0}},
+		},
+		{Package: "colors/red", Licenses: []*testResultLicense{
+			{License: "MIT License", Score: 98, Missing: 2}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -182,11 +233,18 @@ func TestBrokenDependency(t *testing.T) {
 
 func TestPackageExpression(t *testing.T) {
 	err := compareTestLicenses([]string{"colors/cmd/..."}, []testResult{
-		{Package: "colors/cmd/mix", License: "Academic Free License v3.0", Score: 100},
-		{Package: "colors/cmd/paint", License: "Academic Free License v3.0", Score: 100},
-		{Package: "colors/red", License: "MIT License", Score: 98, Missing: 2},
-		{Package: "couleurs/red", License: "GNU Lesser General Public License v2.1",
-			Score: 100},
+		{Package: "colors/cmd/mix", Licenses: []*testResultLicense{
+			{License: "Academic Free License v3.0", Score: 100}},
+		},
+		{Package: "colors/cmd/paint", Licenses: []*testResultLicense{
+			{License: "Academic Free License v3.0", Score: 100}},
+		},
+		{Package: "colors/red", Licenses: []*testResultLicense{
+			{License: "MIT License", Score: 98, Missing: 2}},
+		},
+		{Package: "couleurs/red", Licenses: []*testResultLicense{
+			{License: "GNU Lesser General Public License v2.1", Score: 100}},
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -197,14 +255,14 @@ func TestCleanLicenseData(t *testing.T) {
 	data := `The MIT License (MIT)
 
 	Copyright (c) 2013 Ben Johnson
-	
+
 	Some other lines.
 	And more.
 	`
 	cleaned := string(cleanLicenseData([]byte(data)))
-	wanted := "the mit license (mit)\n\t\n\tsome other lines.\n\tand more.\n\t"
+	wanted := "the mit license (mit)\n\n\tsome other lines.\n\tand more.\n\t"
 	if wanted != cleaned {
-		t.Fatalf("license data mismatch: %q\n!=\n%q", cleaned, wanted)
+		t.Fatalf("license data mismatch:\n%q\n!=\n%q", cleaned, wanted)
 	}
 }
 
@@ -216,14 +274,20 @@ func TestStandardPackages(t *testing.T) {
 }
 
 func TestOverrides(t *testing.T) {
-	wl := []projectAndLicense{
-		{Project: "colors/broken", License: "GNU General Public License v3.0", Confidence: 1},
-		{Project: "colors/red", License: "override existing", Confidence: 1},
-		{Project: "colors/missing", License: "override missing", Confidence: 1},
+	wl := []projectAndLicenses{
+		{Project: "colors/broken", Licenses: []truncLicense{
+			{Name: "GNU General Public License v3.0", Confidence: 1}},
+		},
+		{Project: "colors/red", Licenses: []truncLicense{
+			{Name: "override existing", Confidence: 1}},
+		},
+		{Project: "colors/missing", Licenses: []truncLicense{
+			{Name: "override missing", Confidence: 1}},
+		},
 	}
 	override := `[
-		{"project": "colors/missing", "license": "override missing"},
-		{"project": "colors/red", "license": "override existing"}
+		{"project": "colors/missing", "licenses": [{"name": "override missing"}]},
+		{"project": "colors/red", "licenses": [{"name": "override existing"}]}
 	]`
 
 	wd, derr := os.Getwd()
@@ -240,7 +304,7 @@ func TestOverrides(t *testing.T) {
 	}
 	for i := range c {
 		if !reflect.DeepEqual(wl[i], c[i]) {
-			t.Errorf("#%d: got %+v, expected %+v", i, c[i], wl[i])
+			t.Errorf("#%d:\ngot      %+v,\nexpected %+v", i, c[i], wl[i])
 		}
 	}
 }
